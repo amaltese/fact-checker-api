@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import wikipedia
@@ -94,9 +94,9 @@ def read_root():
             "/extract-and-verify": "POST - Extract claims from text and verify each one"
         }
     }
-@app.get("/app")
+@app.get("/app", response_class=FileResponse)
 def serve_app():
-    return FileResponse('index.html')
+    return FileResponse('index.html', media_type='text/html')
 
 @app.post("/verify-claim", response_model=VerificationResult)
 def verify_claim(request: ClaimRequest):
