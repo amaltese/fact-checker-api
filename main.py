@@ -52,7 +52,7 @@ def extract_claims(text: str) -> list:
         return []
     
     try:
-        model = genai.GenerativeModel('models/gemini-2.0-flash-exp')
+        model = genai.GenerativeModel('models/gemini-2.0-flash')
         
         prompt = f"""Extract all factual claims from the following text. 
         Return ONLY a numbered list of discrete factual claims, one per line.
