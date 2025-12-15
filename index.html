@@ -247,6 +247,10 @@ def extract_and_verify(request: TextRequest):
         "results": results
     }
 
+@app.get("/app")
+def serve_app():
+    return FileResponse('index.html')
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
