@@ -52,7 +52,7 @@ def extract_claims(text: str) -> list:
         return []
     
     try:
-        model = genai.GenerativeModel('gemini-2.0-flash')
+        model = genai.GenerativeModel('models/gemini-2.0-flash-exp')
         
         prompt = f"""Extract all factual claims from the following text. 
         Return ONLY a numbered list of discrete factual claims, one per line.
@@ -90,10 +90,12 @@ def read_root():
         "message": "Wikipedia Fact Checker API",
         "endpoints": {
             "/verify-claim": "POST - Verify a factual claim against Wikipedia",
-            "/extract-and-verify": "POST - Extract claims from text and verify each one"
+            "/extract-and-verify": "POST - Extract claims from text and verify each one",
+            "/app": "GET - Access the fact checker web interface"
         }
     }
-@app.get("/app", response_class=FileResponse)
+
+@app.get("/app")
 def serve_app():
     return FileResponse('index.html', media_type='text/html')
 
@@ -234,7 +236,7 @@ def extract_and_verify(request: TextRequest):
         try:
             claim_request = ClaimRequest(claim=claim)
             result = verify_claim(claim_request)
-            results.append(result.dict())
+            results.append(result.model_dump())
         except Exception as e:
             logger.error(f"Error verifying claim '{claim}': {str(e)}")
             results.append({
