@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import wikipedia
@@ -95,9 +95,11 @@ def read_root():
         }
     }
 
-@app.get("/app")
+@app.get("/app", response_class=HTMLResponse)
 def serve_app():
-    return FileResponse('index.html', media_type='text/html')
+    with open('index.html', 'r') as f:
+        html_content = f.read()
+    return html_content
 
 @app.post("/verify-claim", response_model=VerificationResult)
 def verify_claim(request: ClaimRequest):
