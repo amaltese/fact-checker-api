@@ -20,7 +20,6 @@ if GEMINI_API_KEY:
 else:
     logger.warning("GEMINI_API_KEY not found in environment variables")
 
-# Allow Custom GPT to call this API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -36,224 +35,65 @@ class TextRequest(BaseModel):
     text: str
 
 class VerificationResult(BaseModel):
-    status: str  # "confirmed", "refuted", "unclear"
+    status: str
     claim: str
     evidence: str
     source_url: str
-    confidence: str  # "high", "medium", "low"
+    confidence: str
 
 def extract_claims(text: str) -> list:
-    """
-    Use Gemini to extract factual claims from text.
-    Returns a list of claim strings.
-    """
     if not GEMINI_API_KEY:
-        logger.error("Cannot extract claims - GEMINI_API_KEY not configured")
         return []
-    
     try:
+        # UPDATED MODEL NAME
         model = genai.GenerativeModel('models/gemini-2.0-flash-exp')
-        
-        prompt = f"""Extract all factual claims from the following text. 
-        Return ONLY a numbered list of discrete factual claims, one per line.
-        Do not include opinions, interpretations, or analysis.
-        Each claim should be a complete, verifiable statement.
-        
-        Text: {text}
-        
-        Claims:"""
-        
+        prompt = f"Extract factual claims from: {text}. Return ONLY a numbered list."
         response = model.generate_content(prompt)
-        claims_text = response.text
-        
-        # Parse the numbered list into individual claims
         claims = []
-        for line in claims_text.split('\n'):
+        for line in response.text.split('\n'):
             line = line.strip()
-            # Remove numbering (1., 2., etc.)
-            if line and (line[0].isdigit() or line.startswith('-') or line.startswith('*')):
-                # Remove the number/bullet and clean up
+            if line and (line[0].isdigit() or line.startswith('-')):
                 claim = line.lstrip('0123456789.-* ').strip()
-                if claim:
-                    claims.append(claim)
-        
-        logger.info(f"Extracted {len(claims)} claims from text")
+                if claim: claims.append(claim)
         return claims
-    
     except Exception as e:
-        logger.error(f"Error extracting claims: {str(e)}")
+        logger.error(f"Error: {e}")
         return []
 
 @app.get("/")
 def read_root():
-    return {
-        "message": "Wikipedia Fact Checker API",
-        "endpoints": {
-            "/verify-claim": "POST - Verify a factual claim against Wikipedia",
-            "/extract-and-verify": "POST - Extract claims from text and verify each one",
-            "/app": "GET - Access the fact checker web interface"
-        }
-    }
+    return {"message": "API is running", "app_url": "/app"}
 
+# FIXED /APP ENDPOINT
 @app.get("/app", response_class=HTMLResponse)
 def serve_app():
     with open('index.html', 'r') as f:
-        html_content = f.read()
-    return html_content
+        return f.read()
 
 @app.post("/verify-claim", response_model=VerificationResult)
 def verify_claim(request: ClaimRequest):
-    """
-    Verify a factual claim against Wikipedia.
-    Returns status, evidence, and source URL.
-    """
     claim = request.claim.strip()
+    search_results = wikipedia.search(claim, results=1)
+    if not search_results:
+        return VerificationResult(status="unclear", claim=claim, evidence="No page found", source_url="", confidence="low")
     
-    if not claim:
-        raise HTTPException(status_code=400, detail="Claim cannot be empty")
-    
-    logger.info(f"Verifying claim: {claim}")
-    
-    try:
-        # Extract key terms from the claim for search
-        # Simple approach: use first few significant words
-        search_terms = claim.split()[:5]
-        search_query = " ".join(search_terms)
-        
-        logger.info(f"Searching Wikipedia for: {search_query}")
-        
-        # Search Wikipedia
-        search_results = wikipedia.search(search_query, results=3)
-        
-        if not search_results:
-            return VerificationResult(
-                status="unclear",
-                claim=claim,
-                evidence="No relevant Wikipedia articles found.",
-                source_url="",
-                confidence="low"
-            )
-        
-        # Get the summary of the top result
-        page_title = search_results[0]
-        page = wikipedia.page(page_title, auto_suggest=False)
-        summary = page.summary
-        
-        # Simple verification logic
-        # Check if key terms from claim appear in summary
-        claim_lower = claim.lower()
-        summary_lower = summary.lower()
-        
-        # Extract key terms (very basic - just words longer than 3 chars)
-        claim_words = [w for w in claim_lower.split() if len(w) > 3]
-        
-        # Count how many key terms appear in summary
-        matches = sum(1 for word in claim_words if word in summary_lower)
-        match_ratio = matches / len(claim_words) if claim_words else 0
-        
-        # Determine status based on match ratio
-        if match_ratio > 0.5:
-            status = "confirmed"
-            confidence = "medium" if match_ratio < 0.8 else "high"
-            evidence = summary[:500] + "..." if len(summary) > 500 else summary
-        elif match_ratio > 0.2:
-            status = "unclear"
-            confidence = "low"
-            evidence = summary[:500] + "..." if len(summary) > 500 else summary
-        else:
-            status = "unclear"
-            confidence = "low"
-            evidence = f"Found article '{page_title}' but couldn't verify the specific claim. Summary: {summary[:300]}..."
-        
-        return VerificationResult(
-            status=status,
-            claim=claim,
-            evidence=evidence,
-            source_url=page.url,
-            confidence=confidence
-        )
-    
-    except wikipedia.exceptions.DisambiguationError as e:
-        # Multiple possible articles - take the first option
-        logger.info(f"Disambiguation needed, using: {e.options[0]}")
-        try:
-            page = wikipedia.page(e.options[0], auto_suggest=False)
-            summary = page.summary[:500]
-            return VerificationResult(
-                status="unclear",
-                claim=claim,
-                evidence=f"Multiple articles found. Checking '{e.options[0]}': {summary}...",
-                source_url=page.url,
-                confidence="low"
-            )
-        except Exception:
-            return VerificationResult(
-                status="unclear",
-                claim=claim,
-                evidence="Multiple possible topics found. Please be more specific.",
-                source_url="",
-                confidence="low"
-            )
-    
-    except wikipedia.exceptions.PageError:
-        return VerificationResult(
-            status="unclear",
-            claim=claim,
-            evidence="No Wikipedia page found for this topic.",
-            source_url="",
-            confidence="low"
-        )
-    
-    except Exception as e:
-        logger.error(f"Error verifying claim: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error processing claim: {str(e)}")
+    page = wikipedia.page(search_results[0], auto_suggest=False)
+    return VerificationResult(
+        status="confirmed" if claim.lower() in page.summary.lower() else "unclear",
+        claim=claim,
+        evidence=page.summary[:500],
+        source_url=page.url,
+        confidence="medium"
+    )
 
 @app.post("/extract-and-verify")
 def extract_and_verify(request: TextRequest):
-    """
-    Extract claims from text and verify each one against Wikipedia.
-    Returns a list of verification results.
-    """
-    text = request.text.strip()
-    
-    if not text:
-        raise HTTPException(status_code=400, detail="Text cannot be empty")
-    
-    logger.info(f"Processing text of length {len(text)}")
-    
-    # Extract claims
-    claims = extract_claims(text)
-    
-    if not claims:
-        return {
-            "original_text": text,
-            "claims_found": 0,
-            "results": [],
-            "message": "No factual claims could be extracted from the text."
-        }
-    
-    # Verify each claim
+    claims = extract_claims(request.text)
     results = []
-    for claim in claims:
-        try:
-            claim_request = ClaimRequest(claim=claim)
-            result = verify_claim(claim_request)
-            results.append(result.model_dump())
-        except Exception as e:
-            logger.error(f"Error verifying claim '{claim}': {str(e)}")
-            results.append({
-                "status": "error",
-                "claim": claim,
-                "evidence": f"Error processing claim: {str(e)}",
-                "source_url": "",
-                "confidence": "low"
-            })
-    
-    return {
-        "original_text": text,
-        "claims_found": len(claims),
-        "results": results
-    }
+    for c in claims:
+        res = verify_claim(ClaimRequest(claim=c))
+        results.append(res.model_dump()) # UPDATED TO model_dump()
+    return {"claims_found": len(claims), "results": results}
 
 if __name__ == "__main__":
     import uvicorn
