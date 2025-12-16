@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse  # Correctly imported
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import wikipedia
@@ -35,7 +35,7 @@ class TextRequest(BaseModel):
     text: str
 
 class VerificationResult(BaseModel):
-    status: str
+    status: str 
     claim: str
     evidence: str
     source_url: str
@@ -45,9 +45,9 @@ def extract_claims(text: str) -> list:
     if not GEMINI_API_KEY:
         return []
     try:
-        # UPDATED MODEL NAME
+        # Using the updated model name for 2025
         model = genai.GenerativeModel('models/gemini-2.0-flash-exp')
-        prompt = f"Extract factual claims from: {text}. Return ONLY a numbered list."
+        prompt = f"Extract all factual claims from the following text. Return ONLY a numbered list.\n\nText: {text}"
         response = model.generate_content(prompt)
         claims = []
         for line in response.text.split('\n'):
@@ -62,29 +62,37 @@ def extract_claims(text: str) -> list:
 
 @app.get("/")
 def read_root():
-    return {"message": "API is running", "app_url": "/app"}
+    return {"message": "Wikipedia Fact Checker API", "interface": "/app"}
 
-# FIXED /APP ENDPOINT
+# FIXED: Explicitly returns HTMLResponse so the browser renders the page
 @app.get("/app", response_class=HTMLResponse)
 def serve_app():
-    with open('index.html', 'r') as f:
-        return f.read()
+    try:
+        with open('index.html', 'r') as f:
+            return f.read()
+    except FileNotFoundError:
+        return "Error: index.html not found in the server directory."
 
 @app.post("/verify-claim", response_model=VerificationResult)
 def verify_claim(request: ClaimRequest):
     claim = request.claim.strip()
-    search_results = wikipedia.search(claim, results=1)
-    if not search_results:
-        return VerificationResult(status="unclear", claim=claim, evidence="No page found", source_url="", confidence="low")
-    
-    page = wikipedia.page(search_results[0], auto_suggest=False)
-    return VerificationResult(
-        status="confirmed" if claim.lower() in page.summary.lower() else "unclear",
-        claim=claim,
-        evidence=page.summary[:500],
-        source_url=page.url,
-        confidence="medium"
-    )
+    try:
+        search_results = wikipedia.search(claim, results=1)
+        if not search_results:
+            return VerificationResult(status="unclear", claim=claim, evidence="No results", source_url="", confidence="low")
+        
+        page = wikipedia.page(search_results[0], auto_suggest=False)
+        # Basic check for claim presence in summary
+        status = "confirmed" if claim.lower() in page.summary.lower() else "unclear"
+        return VerificationResult(
+            status=status,
+            claim=claim,
+            evidence=page.summary[:500],
+            source_url=page.url,
+            confidence="medium"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/extract-and-verify")
 def extract_and_verify(request: TextRequest):
@@ -92,7 +100,8 @@ def extract_and_verify(request: TextRequest):
     results = []
     for c in claims:
         res = verify_claim(ClaimRequest(claim=c))
-        results.append(res.model_dump()) # UPDATED TO model_dump()
+        # FIXED: Using model_dump() instead of .dict() for Pydantic v2 compatibility
+        results.append(res.model_dump()) 
     return {"claims_found": len(claims), "results": results}
 
 if __name__ == "__main__":
