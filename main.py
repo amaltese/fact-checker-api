@@ -77,28 +77,38 @@ def verify_claim(request: ClaimRequest):
     try:
         model = genai.GenerativeModel('models/gemini-2.0-flash-exp')
         
-        # FIX 1: Use AI to create a smart Wikipedia search term instead of just 5 words
-        search_prompt = f"Convert this claim into 2-3 specific Wikipedia search keywords: '{claim}'"
-        search_query = model.generate_content(search_prompt).text.strip()
+        # FIX 1: Strict prompt to prevent AI "chattiness" and character limits
+        search_prompt = f"Identify the primary subject of this claim. Return ONLY 2-3 keywords for a Wikipedia search. No intro, no quotes.\nClaim: {claim}"
+        search_query_response = model.generate_content(search_prompt).text.strip()
+        
+        # FIX 2: Manually truncate to 250 chars to avoid the Wikipedia API 300-char limit error
+        search_query = search_query_response[:250]
         
         logger.info(f"Searching Wikipedia for: {search_query}")
         search_results = wikipedia.search(search_query, results=1)
         
+        # FIX 3: If specific search fails, try searching the claim itself (truncated)
+        if not search_results:
+            logger.info("Specific search failed, trying direct claim search...")
+            search_results = wikipedia.search(claim[:250], results=1)
+
         if not search_results:
             return VerificationResult(status="unclear", claim=claim, evidence="No relevant Wikipedia page found.", source_url="", confidence="low")
         
         page = wikipedia.page(search_results[0], auto_suggest=False)
         
-        # FIX 2: Use AI to actually READ the Wikipedia text and compare it to the claim
+        # Use AI to verify the fact against the summary
         verify_prompt = f"""
         Claim: {claim}
         Wikipedia Evidence: {page.summary[:1500]}
         
-        Is the claim confirmed, refuted, or unclear based on the evidence?
+        Is the claim confirmed, refuted, or unclear based on the evidence? 
         Provide a 1-sentence explanation.
         Format: [STATUS] | [EXPLANATION]
         """
         raw_res = model.generate_content(verify_prompt).text
+        
+        # Standardize the output status
         status_part = raw_res.split('|')[0].lower()
         explanation = raw_res.split('|')[-1].strip()
 
@@ -114,6 +124,7 @@ def verify_claim(request: ClaimRequest):
             confidence="high"
         )
     except Exception as e:
+        logger.error(f"Error processing claim: {e}")
         return VerificationResult(status="unclear", claim=claim, evidence=f"Processing error: {str(e)}", source_url="", confidence="low")
 
 @app.post("/extract-and-verify")
