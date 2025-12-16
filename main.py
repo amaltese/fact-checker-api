@@ -114,16 +114,23 @@ def verify_claim(request: ClaimRequest):
         final_res = model.generate_content(verify_prompt).text.strip()
         status_part, explanation = final_res.split('|')
         
-        return VerificationResult(
-            status=status_part.strip().lower(),
-            claim=claim,
-            evidence=explanation.strip(),
-            source_url=page.url,
-            confidence="high"
-        )
+    return VerificationResult(
+        status=status_part.strip().lower(),
+        claim=claim,
+        evidence=explanation.strip(),
+        source_url=page.url,
+        confidence="high"
+    )
     except Exception as e:
-        logger.error(f"Error: {e}")
-        return VerificationResult(status="unclear", claim=claim, evidence=f"Error: {str(e)}", source_url="", confidence="low")back to current logic or error handling...
+        logger.error(f"Error verifying claim '{claim}': {str(e)}")
+        # This line was previously broken by trailing text
+        return VerificationResult(
+            status="unclear", 
+            claim=claim, 
+            evidence=f"Error: {str(e)}", 
+            source_url="", 
+            confidence="low"
+        )
 
 @app.post("/extract-and-verify")
 def extract_and_verify(request: TextRequest):
