@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import wikipedia
@@ -52,7 +52,7 @@ def extract_claims(text: str) -> list:
         return []
     
     try:
-        model = genai.GenerativeModel('models/gemini-2.0-flash')
+        model = genai.GenerativeModel('models/gemini-2.0-flash-exp')
         
         prompt = f"""Extract all factual claims from the following text. 
         Return ONLY a numbered list of discrete factual claims, one per line.
