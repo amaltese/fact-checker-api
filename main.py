@@ -122,7 +122,8 @@ def verify_claim(request: ClaimRequest):
             confidence="high"
         )
     except Exception as e:
-        # Fallback to current logic or error handling...
+        logger.error(f"Error: {e}")
+        return VerificationResult(status="unclear", claim=claim, evidence=f"Error: {str(e)}", source_url="", confidence="low")back to current logic or error handling...
 
 @app.post("/extract-and-verify")
 def extract_and_verify(request: TextRequest):
