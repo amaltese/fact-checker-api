@@ -74,24 +74,18 @@ def serve_app():
 @app.post("/verify-claim", response_model=VerificationResult)
 def verify_claim(request: ClaimRequest):
     claim = request.claim.strip()
-    
-    # NEW IMPROVED LOGIC: Use Gemini to build a smart search query
-    # This solves the "the city" / "it" context problem
-    search_prompt = f"""
-    Based on this claim, what is the best specific Wikipedia search query to find supporting evidence?
-    If the claim uses pronouns like 'it' or 'the city', replace them with the correct subject.
-    Return ONLY the search query string.
-    
-    Claim: {claim}
-    """
+    model = genai.GenerativeModel('models/gemini-2.0-flash-exp')
     
     try:
-        model = genai.GenerativeModel('models/gemini-2.0-flash-exp')
+        # STEP 1: Context Recovery (Fixes "the city" / "it" issues)
+        search_prompt = f"""
+        Based on this claim, what is the best specific Wikipedia search query?
+        If the claim uses pronouns like 'it' or 'the city', replace them with the correct subject.
+        Return ONLY the search query string.
+        Claim: {claim}
+        """
         search_query_response = model.generate_content(search_prompt)
-        search_query = search_query_response.text.strip()
-        
-        # Ensure query is under Wikipedia's 300-character limit
-        search_query = search_query[:250]
+        search_query = search_query_response.text.strip()[:250]
         
         logger.info(f"Smart Search Query: {search_query}")
         search_results = wikipedia.search(search_query, results=1)
@@ -101,7 +95,7 @@ def verify_claim(request: ClaimRequest):
 
         page = wikipedia.page(search_results[0], auto_suggest=False)
         
-        # FINAL VERIFICATION: Let Gemini compare the claim to the actual Wikipedia summary
+        # STEP 2: Semantic Verification (Fixes Dutch East India Co vs West India Co)
         verify_prompt = f"""
         Claim: {claim}
         Wikipedia Evidence: {page.summary[:1500]}
@@ -111,19 +105,29 @@ def verify_claim(request: ClaimRequest):
         Format: [STATUS] | [EXPLANATION]
         """
         
-        final_res = model.generate_content(verify_prompt).text.strip()
-        status_part, explanation = final_res.split('|')
+        # Add a 1-second delay to avoid Rate Limit (429) errors
+        import time
+        time.sleep(1)
         
-    return VerificationResult(
-        status=status_part.strip().lower(),
-        claim=claim,
-        evidence=explanation.strip(),
-        source_url=page.url,
-        confidence="high"
-    )
+        final_res = model.generate_content(verify_prompt).text.strip()
+        
+        # Ensure the response format is correct before splitting
+        if "|" in final_res:
+            status_part, explanation = final_res.split('|', 1)
+        else:
+            status_part, explanation = "unclear", final_res
+
+        # The return MUST be inside the try block and indented correctly
+        return VerificationResult(
+            status=status_part.strip().lower(),
+            claim=claim,
+            evidence=explanation.strip(),
+            source_url=page.url,
+            confidence="high"
+        )
+
     except Exception as e:
         logger.error(f"Error verifying claim '{claim}': {str(e)}")
-        # This line was previously broken by trailing text
         return VerificationResult(
             status="unclear", 
             claim=claim, 
