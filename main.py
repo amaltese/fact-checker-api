@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse  # Correctly imported
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import wikipedia
@@ -45,9 +45,8 @@ def extract_claims(text: str) -> list:
     if not GEMINI_API_KEY:
         return []
     try:
-        # Using the updated model name for 2025
         model = genai.GenerativeModel('models/gemini-2.0-flash-exp')
-        prompt = f"Extract all factual claims from the following text. Return ONLY a numbered list.\n\nText: {text}"
+        prompt = f"Extract factual claims from this text. Return ONLY a numbered list:\n\n{text}"
         response = model.generate_content(prompt)
         claims = []
         for line in response.text.split('\n'):
@@ -57,42 +56,65 @@ def extract_claims(text: str) -> list:
                 if claim: claims.append(claim)
         return claims
     except Exception as e:
-        logger.error(f"Error: {e}")
+        logger.error(f"Extraction Error: {e}")
         return []
 
 @app.get("/")
 def read_root():
-    return {"message": "Wikipedia Fact Checker API", "interface": "/app"}
+    return {"message": "API is running", "interface": "/app"}
 
-# FIXED: Explicitly returns HTMLResponse so the browser renders the page
 @app.get("/app", response_class=HTMLResponse)
 def serve_app():
     try:
         with open('index.html', 'r') as f:
             return f.read()
     except FileNotFoundError:
-        return "Error: index.html not found in the server directory."
+        return "Error: index.html not found."
 
 @app.post("/verify-claim", response_model=VerificationResult)
 def verify_claim(request: ClaimRequest):
     claim = request.claim.strip()
     try:
-        search_results = wikipedia.search(claim, results=1)
+        model = genai.GenerativeModel('models/gemini-2.0-flash-exp')
+        
+        # FIX 1: Use AI to create a smart Wikipedia search term instead of just 5 words
+        search_prompt = f"Convert this claim into 2-3 specific Wikipedia search keywords: '{claim}'"
+        search_query = model.generate_content(search_prompt).text.strip()
+        
+        logger.info(f"Searching Wikipedia for: {search_query}")
+        search_results = wikipedia.search(search_query, results=1)
+        
         if not search_results:
-            return VerificationResult(status="unclear", claim=claim, evidence="No results", source_url="", confidence="low")
+            return VerificationResult(status="unclear", claim=claim, evidence="No relevant Wikipedia page found.", source_url="", confidence="low")
         
         page = wikipedia.page(search_results[0], auto_suggest=False)
-        # Basic check for claim presence in summary
-        status = "confirmed" if claim.lower() in page.summary.lower() else "unclear"
+        
+        # FIX 2: Use AI to actually READ the Wikipedia text and compare it to the claim
+        verify_prompt = f"""
+        Claim: {claim}
+        Wikipedia Evidence: {page.summary[:1500]}
+        
+        Is the claim confirmed, refuted, or unclear based on the evidence?
+        Provide a 1-sentence explanation.
+        Format: [STATUS] | [EXPLANATION]
+        """
+        raw_res = model.generate_content(verify_prompt).text
+        status_part = raw_res.split('|')[0].lower()
+        explanation = raw_res.split('|')[-1].strip()
+
+        status = "unclear"
+        if "confirmed" in status_part: status = "confirmed"
+        elif "refuted" in status_part: status = "refuted"
+
         return VerificationResult(
             status=status,
             claim=claim,
-            evidence=page.summary[:500],
+            evidence=explanation,
             source_url=page.url,
-            confidence="medium"
+            confidence="high"
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return VerificationResult(status="unclear", claim=claim, evidence=f"Processing error: {str(e)}", source_url="", confidence="low")
 
 @app.post("/extract-and-verify")
 def extract_and_verify(request: TextRequest):
@@ -100,7 +122,6 @@ def extract_and_verify(request: TextRequest):
     results = []
     for c in claims:
         res = verify_claim(ClaimRequest(claim=c))
-        # FIXED: Using model_dump() instead of .dict() for Pydantic v2 compatibility
         results.append(res.model_dump()) 
     return {"claims_found": len(claims), "results": results}
 
