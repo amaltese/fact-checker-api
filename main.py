@@ -74,58 +74,55 @@ def serve_app():
 @app.post("/verify-claim", response_model=VerificationResult)
 def verify_claim(request: ClaimRequest):
     claim = request.claim.strip()
+    
+    # NEW IMPROVED LOGIC: Use Gemini to build a smart search query
+    # This solves the "the city" / "it" context problem
+    search_prompt = f"""
+    Based on this claim, what is the best specific Wikipedia search query to find supporting evidence?
+    If the claim uses pronouns like 'it' or 'the city', replace them with the correct subject.
+    Return ONLY the search query string.
+    
+    Claim: {claim}
+    """
+    
     try:
         model = genai.GenerativeModel('models/gemini-2.0-flash-exp')
+        search_query_response = model.generate_content(search_prompt)
+        search_query = search_query_response.text.strip()
         
-        # FIX 1: Strict prompt to prevent AI "chattiness" and character limits
-        search_prompt = f"Identify the primary subject of this claim. Return ONLY 2-3 keywords for a Wikipedia search. No intro, no quotes.\nClaim: {claim}"
-        search_query_response = model.generate_content(search_prompt).text.strip()
+        # Ensure query is under Wikipedia's 300-character limit
+        search_query = search_query[:250]
         
-        # FIX 2: Manually truncate to 250 chars to avoid the Wikipedia API 300-char limit error
-        search_query = search_query_response[:250]
-        
-        logger.info(f"Searching Wikipedia for: {search_query}")
+        logger.info(f"Smart Search Query: {search_query}")
         search_results = wikipedia.search(search_query, results=1)
         
-        # FIX 3: If specific search fails, try searching the claim itself (truncated)
         if not search_results:
-            logger.info("Specific search failed, trying direct claim search...")
-            search_results = wikipedia.search(claim[:250], results=1)
+            return VerificationResult(status="unclear", claim=claim, evidence="No relevant Wikipedia articles found.", source_url="", confidence="low")
 
-        if not search_results:
-            return VerificationResult(status="unclear", claim=claim, evidence="No relevant Wikipedia page found.", source_url="", confidence="low")
-        
         page = wikipedia.page(search_results[0], auto_suggest=False)
         
-        # Use AI to verify the fact against the summary
+        # FINAL VERIFICATION: Let Gemini compare the claim to the actual Wikipedia summary
         verify_prompt = f"""
         Claim: {claim}
         Wikipedia Evidence: {page.summary[:1500]}
         
-        Is the claim confirmed, refuted, or unclear based on the evidence? 
+        Is the claim CONFIRMED, REFUTED, or UNCLEAR based on the evidence? 
         Provide a 1-sentence explanation.
         Format: [STATUS] | [EXPLANATION]
         """
-        raw_res = model.generate_content(verify_prompt).text
         
-        # Standardize the output status
-        status_part = raw_res.split('|')[0].lower()
-        explanation = raw_res.split('|')[-1].strip()
-
-        status = "unclear"
-        if "confirmed" in status_part: status = "confirmed"
-        elif "refuted" in status_part: status = "refuted"
-
+        final_res = model.generate_content(verify_prompt).text.strip()
+        status_part, explanation = final_res.split('|')
+        
         return VerificationResult(
-            status=status,
+            status=status_part.strip().lower(),
             claim=claim,
-            evidence=explanation,
+            evidence=explanation.strip(),
             source_url=page.url,
             confidence="high"
         )
     except Exception as e:
-        logger.error(f"Error processing claim: {e}")
-        return VerificationResult(status="unclear", claim=claim, evidence=f"Processing error: {str(e)}", source_url="", confidence="low")
+        # Fallback to current logic or error handling...
 
 @app.post("/extract-and-verify")
 def extract_and_verify(request: TextRequest):
