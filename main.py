@@ -45,7 +45,7 @@ def extract_claims(text: str) -> list:
     if not GEMINI_API_KEY:
         return []
     try:
-        model = genai.GenerativeModel('models/gemini-2.5-flash-exp')
+        model = genai.GenerativeModel('models/gemini-2.5-flash')
         prompt = f"Extract factual claims from this text. Return ONLY a numbered list:\n\n{text}"
         response = model.generate_content(prompt)
         claims = []
