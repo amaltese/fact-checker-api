@@ -6,6 +6,7 @@ import wikipedia
 import logging
 import google.generativeai as genai
 import os
+import time
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -13,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Wikipedia Fact Checker API")
 
-# Configure Gemini
+# Configure Gemini - Updated to use Gemini 2.5 Flash for production stability
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
@@ -28,25 +29,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class ClaimRequest(BaseModel):
-    claim: str
-
 class TextRequest(BaseModel):
     text: str
-
-class VerificationResult(BaseModel):
-    status: str 
-    claim: str
-    evidence: str
-    source_url: str
-    confidence: str
 
 def extract_claims(text: str) -> list:
     if not GEMINI_API_KEY:
         return []
     try:
-        model = genai.GenerativeModel('models/gemini-2.5-flash')
-        prompt = f"Extract factual claims from this text. Return ONLY a numbered list:\n\n{text}"
+        # Using Gemini 2.5 Flash for extraction
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        prompt = f"Extract the top 5 factual claims from this text. Return ONLY a numbered list:\n\n{text}"
         response = model.generate_content(prompt)
         claims = []
         for line in response.text.split('\n'):
@@ -59,90 +51,63 @@ def extract_claims(text: str) -> list:
         logger.error(f"Extraction Error: {e}")
         return []
 
-@app.get("/")
-def read_root():
-    return {"message": "API is running", "interface": "/app"}
-
-@app.get("/app", response_class=HTMLResponse)
-def serve_app():
-    try:
-        with open('index.html', 'r') as f:
-            return f.read()
-    except FileNotFoundError:
-        return "Error: index.html not found."
-
-@app.post("/verify-claim", response_model=VerificationResult)
-def verify_claim(request: ClaimRequest):
-    claim = request.claim.strip()
-    model = genai.GenerativeModel('models/gemini-2.0-flash-exp')
-    
-    try:
-        # STEP 1: Context Recovery (Fixes "the city" / "it" issues)
-        search_prompt = f"""
-        Based on this claim, what is the best specific Wikipedia search query?
-        If the claim uses pronouns like 'it' or 'the city', replace them with the correct subject.
-        Return ONLY the search query string.
-        Claim: {claim}
-        """
-        search_query_response = model.generate_content(search_prompt)
-        search_query = search_query_response.text.strip()[:250]
-        
-        logger.info(f"Smart Search Query: {search_query}")
-        search_results = wikipedia.search(search_query, results=1)
-        
-        if not search_results:
-            return VerificationResult(status="unclear", claim=claim, evidence="No relevant Wikipedia articles found.", source_url="", confidence="low")
-
-        page = wikipedia.page(search_results[0], auto_suggest=False)
-        
-        # STEP 2: Semantic Verification (Fixes Dutch East India Co vs West India Co)
-        verify_prompt = f"""
-        Claim: {claim}
-        Wikipedia Evidence: {page.summary[:1500]}
-        
-        Is the claim CONFIRMED, REFUTED, or UNCLEAR based on the evidence? 
-        Provide a 1-sentence explanation.
-        Format: [STATUS] | [EXPLANATION]
-        """
-        
-        # Add a 1-second delay to avoid Rate Limit (429) errors
-        import time
-        time.sleep(1)
-        
-        final_res = model.generate_content(verify_prompt).text.strip()
-        
-        # Ensure the response format is correct before splitting
-        if "|" in final_res:
-            status_part, explanation = final_res.split('|', 1)
-        else:
-            status_part, explanation = "unclear", final_res
-
-        # The return MUST be inside the try block and indented correctly
-        return VerificationResult(
-            status=status_part.strip().lower(),
-            claim=claim,
-            evidence=explanation.strip(),
-            source_url=page.url,
-            confidence="high"
-        )
-
-    except Exception as e:
-        logger.error(f"Error verifying claim '{claim}': {str(e)}")
-        return VerificationResult(
-            status="unclear", 
-            claim=claim, 
-            evidence=f"Error: {str(e)}", 
-            source_url="", 
-            confidence="low"
-        )
-
 @app.post("/extract-and-verify")
 def extract_and_verify(request: TextRequest):
     claims = extract_claims(request.text)
+    if not claims:
+        return {"claims_found": 0, "results": []}
+
+    # Using Gemini 2.5 Flash for the verification logic
+    model = genai.GenerativeModel('gemini-2.5-flash')
     results = []
-    for c in claims:
-        res = verify_claim(ClaimRequest(claim=c))
-        results.append(res.model_dump()) 
+
+    for claim in claims:
+        try:
+            # STEP 1: Context Recovery for Wikipedia Search
+            search_prompt = f"Provide a specific Wikipedia search query for: {claim}. Return ONLY the query string."
+            search_query_res = model.generate_content(search_prompt)
+            search_query = search_query_res.text.strip()
+            
+            # STEP 2: Search Wikipedia
+            search_results = wikipedia.search(search_query, results=1)
+            
+            if not search_results:
+                results.append({"claim": claim, "found": "No relevant Wikipedia articles found."})
+                continue
+
+            page = wikipedia.page(search_results[0], auto_suggest=False)
+            
+            # STEP 3: Simplified Fact Summary (Removed "Confirmed/Unclear" status)
+            verify_prompt = f"""
+            Claim: {claim}
+            Wikipedia Evidence: {page.summary[:1500]}
+            
+            Based ONLY on the evidence, provide a one-sentence summary of what was found regarding this claim. 
+            Do NOT include judgments like 'Confirmed' or 'Refuted'. 
+            Format: "claim: {claim} | found: [Your summary]"
+            """
+            
+            # Small delay to ensure we stay well within Gemini 2.5 stable rate limits
+            time.sleep(0.5)
+            
+            final_res = model.generate_content(verify_prompt).text.strip()
+            
+            # Extract just the "found" portion for the response
+            if "found:" in final_res:
+                finding = final_res.split("found:", 1)[1].strip()
+            else:
+                finding = final_res
+
+            results.append({
+                "claim": claim,
+                "found": finding,
+                "source_url": page.url
+            })
+
+        except Exception as e:
+            logger.error(f"Error processing claim '{claim}': {e}")
+            results.append({"claim": claim, "found": f"Error retrieving data: {str(e)}"})
+
     return {"claims_found": len(claims), "results": results}
 
 if __name__ == "__main__":
