@@ -6,25 +6,33 @@
     <title>Wikipedia Fact Checker</title>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; color: #333; }
-        textarea { width: 100%; height: 150px; padding: 10px; border: 2px solid #ddd; border-radius: 8px; margin-bottom: 1rem; font-size: 1rem; }
-        button { background: #0070f3; color: white; border: none; padding: 12px 24px; border-radius: 8px; cursor: pointer; font-size: 1rem; font-weight: 600; }
-        button:disabled { background: #ccc; }
-        .result-item { border-left: 5px solid #ddd; padding: 15px; margin: 15px 0; background: #f9f9f9; border-radius: 0 8px 8px 0; }
-        .confirmed { border-color: #22c55e; background: #f0fdf4; }
-        .refuted { border-color: #ef4444; background: #fef2f2; }
-        .unclear { border-color: #f59e0b; background: #fffbeb; }
-        .status-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: bold; text-transform: uppercase; margin-bottom: 5px; }
-        .source-link { color: #0070f3; text-decoration: none; font-size: 0.9rem; }
-        #loading { display: none; color: #666; font-style: italic; }
+        textarea { width: 100%; height: 150px; padding: 10px; border: 2px solid #ddd; border-radius: 8px; margin-bottom: 1rem; font-size: 1rem; box-sizing: border-box; }
+        button { background: #0070f3; color: white; border: none; padding: 12px 24px; border-radius: 8px; cursor: pointer; font-size: 1rem; font-weight: 600; transition: background 0.2s; }
+        button:hover { background: #0056b3; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        
+        .result-item { 
+            border-left: 5px solid #0070f3; 
+            padding: 15px; 
+            margin: 15px 0; 
+            background: #f0f7ff; 
+            border-radius: 0 8px 8px 0; 
+        }
+        .claim-text { color: #1a1a1a; font-weight: 700; display: block; margin-bottom: 8px; }
+        .finding-text { font-size: 1rem; color: #444; margin: 0; }
+        .source-link { display: inline-block; margin-top: 10px; color: #0070f3; text-decoration: none; font-size: 0.85rem; font-weight: 500; }
+        .source-link:hover { text-decoration: underline; }
+        
+        #loading { display: none; color: #666; font-style: italic; margin-top: 10px; }
     </style>
 </head>
 <body>
     <h1>Wikipedia Fact Checker</h1>
-    <p>Enter text below to extract factual claims and verify them against Wikipedia.</p>
+    <p>Paste text below to extract and verify claims against Wikipedia using Gemini 2.5 Flash.</p>
     
-    <textarea id="textInput" placeholder="Paste an article, essay, or claim here..."></textarea>
-    <button id="verifyBtn" onclick="verifyText()">Check Facts</button>
-    <p id="loading">Verifying claims with Gemini & Wikipedia... please wait.</p>
+    <textarea id="textInput" placeholder="Paste an article or specific claims here..."></textarea>
+    <button id="verifyBtn" onclick="verifyText()">Verify Claims</button>
+    <p id="loading">Gemini is thinking and searching Wikipedia... please wait.</p>
 
     <div id="results"></div>
 
@@ -55,22 +63,21 @@
                 if (data.results && data.results.length > 0) {
                     data.results.forEach(res => {
                         const div = document.createElement('div');
-                        div.className = `result-item ${res.status}`;
+                        div.className = 'result-item';
                         div.innerHTML = `
-                            <span class="status-badge">${res.status}</span>
-                            <strong>Claim:</strong> ${res.claim}<br>
-                            <p style="margin: 8px 0; font-size: 0.95rem;">${res.evidence}</p>
-                            ${res.source_url ? `<a href="${res.source_url}" target="_blank" class="source-link">Read Wikipedia Source →</a>` : ''}
+                            <span class="claim-text">Claim: ${res.claim}</span>
+                            <p class="finding-text"><strong>Found:</strong> ${res.found}</p>
+                            ${res.source ? `<a href="${res.source}" target="_blank" class="source-link">Source: ${res.source}</a>` : ''}
                         `;
                         resultsDiv.appendChild(div);
                     });
                 } else {
-                    resultsDiv.innerHTML = "<p>No clear factual claims found to verify.</p>";
+                    resultsDiv.innerHTML = "<p>No verifiable claims were found in the text.</p>";
                 }
             } catch (err) {
                 loading.style.display = "none";
                 btn.disabled = false;
-                resultsDiv.innerHTML = `<p style="color:red">Error connecting to API: ${err.message}</p>`;
+                resultsDiv.innerHTML = `<p style="color:red">Connection Error: ${err.message}</p>`;
             }
         }
     </script>
