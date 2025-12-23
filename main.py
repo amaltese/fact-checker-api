@@ -8,18 +8,19 @@ import google.generativeai as genai
 import os
 import time
 
-# Set up logging
+# 1. SETUP LOGGING
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# 2. INITIALIZE APP
 app = FastAPI(title="Wikipedia Fact Checker API")
 
-# Configure Gemini - Updated to use Gemini 2.5 Flash for production stability
+# 3. CONFIGURE GEMINI 2.5 FLASH
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 else:
-    logger.warning("GEMINI_API_KEY not found in environment variables")
+    logger.error("GEMINI_API_KEY not found. API calls will fail.")
 
 app.add_middleware(
     CORSMiddleware,
@@ -32,11 +33,25 @@ app.add_middleware(
 class TextRequest(BaseModel):
     text: str
 
+# --- ROUTES ---
+
+@app.get("/", response_class=HTMLResponse)
+def read_root():
+    """This prevents the 'Not Found' error when visiting the base URL."""
+    return """
+    <html>
+        <head><title>Fact Checker API</title></head>
+        <body>
+            <h1>Fact Checker API is Active</h1>
+            <p>Send a POST request to <code>/extract-and-verify</code> or visit 
+            <a href="/docs">/docs</a> for the interactive UI.</p>
+        </body>
+    </html>
+    """
+
 def extract_claims(text: str) -> list:
-    if not GEMINI_API_KEY:
-        return []
     try:
-        # Using Gemini 2.5 Flash for extraction
+        # Gemini 2.5 Flash is stable and has high limits
         model = genai.GenerativeModel('gemini-2.5-flash')
         prompt = f"Extract the top 5 factual claims from this text. Return ONLY a numbered list:\n\n{text}"
         response = model.generate_content(prompt)
@@ -57,59 +72,50 @@ def extract_and_verify(request: TextRequest):
     if not claims:
         return {"claims_found": 0, "results": []}
 
-    # Using Gemini 2.5 Flash for the verification logic
     model = genai.GenerativeModel('gemini-2.5-flash')
     results = []
 
     for claim in claims:
         try:
-            # STEP 1: Context Recovery for Wikipedia Search
-            search_prompt = f"Provide a specific Wikipedia search query for: {claim}. Return ONLY the query string."
-            search_query_res = model.generate_content(search_prompt)
+            # Step 1: Specific Wiki Query
+            search_query_res = model.generate_content(f"Wikipedia search query for: {claim}. Return ONLY the query.")
             search_query = search_query_res.text.strip()
             
-            # STEP 2: Search Wikipedia
+            # Step 2: Fetch Wikipedia
             search_results = wikipedia.search(search_query, results=1)
-            
             if not search_results:
-                results.append({"claim": claim, "found": "No relevant Wikipedia articles found."})
+                results.append({"claim": claim, "found": "No matching Wikipedia article."})
                 continue
 
             page = wikipedia.page(search_results[0], auto_suggest=False)
             
-            # STEP 3: Simplified Fact Summary (Removed "Confirmed/Unclear" status)
+            # Step 3: Direct Summary (No judgments like Confirmed/Refuted)
             verify_prompt = f"""
             Claim: {claim}
-            Wikipedia Evidence: {page.summary[:1500]}
-            
-            Based ONLY on the evidence, provide a one-sentence summary of what was found regarding this claim. 
-            Do NOT include judgments like 'Confirmed' or 'Refuted'. 
-            Format: "claim: {claim} | found: [Your summary]"
+            Wiki Evidence: {page.summary[:1500]}
+            Based on the evidence, what does Wikipedia say? 
+            One clear sentence. Do not use labels like 'Confirmed' or 'Refuted'.
             """
             
-            # Small delay to ensure we stay well within Gemini 2.5 stable rate limits
+            # Small delay for safety (2.5 Flash tier handles this easily)
             time.sleep(0.5)
             
-            final_res = model.generate_content(verify_prompt).text.strip()
+            verification_res = model.generate_content(verify_prompt).text.strip()
             
-            # Extract just the "found" portion for the response
-            if "found:" in final_res:
-                finding = final_res.split("found:", 1)[1].strip()
-            else:
-                finding = final_res
-
             results.append({
                 "claim": claim,
-                "found": finding,
-                "source_url": page.url
+                "found": verification_res,
+                "source": page.url
             })
 
         except Exception as e:
-            logger.error(f"Error processing claim '{claim}': {e}")
-            results.append({"claim": claim, "found": f"Error retrieving data: {str(e)}"})
+            logger.error(f"Error on claim '{claim}': {e}")
+            results.append({"claim": claim, "found": "Data retrieval error."})
 
     return {"claims_found": len(claims), "results": results}
 
+# --- STARTUP ---
 if __name__ == "__main__":
     import uvicorn
+    # uvicorn.run must be at the BOTTOM so all routes are registered first
     uvicorn.run(app, host="0.0.0.0", port=8000)
