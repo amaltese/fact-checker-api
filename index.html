@@ -1,85 +1,33 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Wikipedia Fact Checker</title>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; color: #333; }
-        textarea { width: 100%; height: 150px; padding: 10px; border: 2px solid #ddd; border-radius: 8px; margin-bottom: 1rem; font-size: 1rem; box-sizing: border-box; }
-        button { background: #0070f3; color: white; border: none; padding: 12px 24px; border-radius: 8px; cursor: pointer; font-size: 1rem; font-weight: 600; transition: background 0.2s; }
-        button:hover { background: #0056b3; }
-        button:disabled { background: #ccc; cursor: not-allowed; }
-        
-        .result-item { 
-            border-left: 5px solid #0070f3; 
-            padding: 15px; 
-            margin: 15px 0; 
-            background: #f0f7ff; 
-            border-radius: 0 8px 8px 0; 
-        }
-        .claim-text { color: #1a1a1a; font-weight: 700; display: block; margin-bottom: 8px; }
-        .finding-text { font-size: 1rem; color: #444; margin: 0; }
-        .source-link { display: inline-block; margin-top: 10px; color: #0070f3; text-decoration: none; font-size: 0.85rem; font-weight: 500; }
-        .source-link:hover { text-decoration: underline; }
-        
-        #loading { display: none; color: #666; font-style: italic; margin-top: 10px; }
-    </style>
-</head>
-<body>
-    <h1>Wikipedia Fact Checker</h1>
-    <p>Paste text below to extract and verify claims against Wikipedia using Gemini 2.5 Flash.</p>
-    
-    <textarea id="textInput" placeholder="Paste an article or specific claims here..."></textarea>
-    <button id="verifyBtn" onclick="verifyText()">Verify Claims</button>
-    <p id="loading">Gemini is thinking and searching Wikipedia... please wait.</p>
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8"/>
+    <title>Fact Checker</title>
+  </head>
+  <body>
+    <h1>Fact Checker</h1>
+    <textarea id="text" rows="10" cols="80" placeholder="Paste text here..."></textarea><br/>
+    <button id="send">Check</button>
 
-    <div id="results"></div>
+    <pre id="output"></pre>
 
     <script>
-        async function verifyText() {
-            const text = document.getElementById('textInput').value;
-            const btn = document.getElementById('verifyBtn');
-            const resultsDiv = document.getElementById('results');
-            const loading = document.getElementById('loading');
+      document.getElementById('send').addEventListener('click', async () => {
+        const text = document.getElementById('text').value;
+        if (!text) return alert('Please enter text');
 
-            if (!text.trim()) return alert("Please enter some text.");
+        const res = await fetch('/extract-and-verify', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ text })
+        });
 
-            btn.disabled = true;
-            loading.style.display = "block";
-            resultsDiv.innerHTML = "";
-
-            try {
-                const response = await fetch('/extract-and-verify', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ text: text })
-                });
-
-                const data = await response.json();
-                loading.style.display = "none";
-                btn.disabled = false;
-
-                if (data.results && data.results.length > 0) {
-                    data.results.forEach(res => {
-                        const div = document.createElement('div');
-                        div.className = 'result-item';
-                        div.innerHTML = `
-                            <span class="claim-text">Claim: ${res.claim}</span>
-                            <p class="finding-text"><strong>Found:</strong> ${res.found}</p>
-                            ${res.source ? `<a href="${res.source}" target="_blank" class="source-link">Source: ${res.source}</a>` : ''}
-                        `;
-                        resultsDiv.appendChild(div);
-                    });
-                } else {
-                    resultsDiv.innerHTML = "<p>No verifiable claims were found in the text.</p>";
-                }
-            } catch (err) {
-                loading.style.display = "none";
-                btn.disabled = false;
-                resultsDiv.innerHTML = `<p style="color:red">Connection Error: ${err.message}</p>`;
-            }
-        }
+        const data = await res.text();
+        // show raw response
+        document.getElementById('output').textContent = data;
+      });
     </script>
-</body>
+  </body>
 </html>
