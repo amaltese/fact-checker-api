@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 # 2. INITIALIZE APP
 app = FastAPI(title="Wikipedia Fact Checker API")
 
-# 3. CONFIGURE GEMINI 2.5 FLASH
+# 3. CONFIGURE GEMINI 2.5 FLASH (Stable Tier)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
@@ -36,22 +36,22 @@ class TextRequest(BaseModel):
 # --- ROUTES ---
 
 @app.get("/", response_class=HTMLResponse)
-def read_root():
-    """This prevents the 'Not Found' error when visiting the base URL."""
-    return """
-    <html>
-        <head><title>Fact Checker API</title></head>
-        <body>
-            <h1>Fact Checker API is Active</h1>
-            <p>Send a POST request to <code>/extract-and-verify</code> or visit 
-            <a href="/docs">/docs</a> for the interactive UI.</p>
-        </body>
-    </html>
-    """
+def serve_interface():
+    """Serves the UI directly at the root URL to prevent 404s."""
+    try:
+        # Tries to load your html file
+        with open('index.html', 'r') as f:
+            return f.read()
+    except FileNotFoundError:
+        # Fallback if index.html is missing
+        return """
+        <h1>Fact Checker API is Running</h1>
+        <p>Error: <b>index.html</b> not found in the script directory.</p>
+        <p>You can still test the API via <a href="/docs">/docs</a></p>
+        """
 
 def extract_claims(text: str) -> list:
     try:
-        # Gemini 2.5 Flash is stable and has high limits
         model = genai.GenerativeModel('gemini-2.5-flash')
         prompt = f"Extract the top 5 factual claims from this text. Return ONLY a numbered list:\n\n{text}"
         response = model.generate_content(prompt)
@@ -81,7 +81,7 @@ def extract_and_verify(request: TextRequest):
             search_query_res = model.generate_content(f"Wikipedia search query for: {claim}. Return ONLY the query.")
             search_query = search_query_res.text.strip()
             
-            # Step 2: Fetch Wikipedia
+            # Step 2: Fetch Wikipedia content
             search_results = wikipedia.search(search_query, results=1)
             if not search_results:
                 results.append({"claim": claim, "found": "No matching Wikipedia article."})
@@ -89,15 +89,15 @@ def extract_and_verify(request: TextRequest):
 
             page = wikipedia.page(search_results[0], auto_suggest=False)
             
-            # Step 3: Direct Summary (No judgments like Confirmed/Refuted)
+            # Step 3: Direct Summary (No judgements like Confirmed/Refuted)
             verify_prompt = f"""
             Claim: {claim}
             Wiki Evidence: {page.summary[:1500]}
-            Based on the evidence, what does Wikipedia say? 
-            One clear sentence. Do not use labels like 'Confirmed' or 'Refuted'.
+            Summarize what Wikipedia says about this claim in one sentence. 
+            Do not use labels like 'Confirmed' or 'Refuted'.
             """
             
-            # Small delay for safety (2.5 Flash tier handles this easily)
+            # 0.5s delay to stay safe under Gemini 2.5 stable rate limits
             time.sleep(0.5)
             
             verification_res = model.generate_content(verify_prompt).text.strip()
@@ -117,5 +117,5 @@ def extract_and_verify(request: TextRequest):
 # --- STARTUP ---
 if __name__ == "__main__":
     import uvicorn
-    # uvicorn.run must be at the BOTTOM so all routes are registered first
+    # uvicorn.run MUST be at the bottom so all routes are registered first
     uvicorn.run(app, host="0.0.0.0", port=8000)
