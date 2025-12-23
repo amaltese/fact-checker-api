@@ -3,13 +3,25 @@
   <head>
     <meta charset="utf-8"/>
     <title>Fact Checker</title>
+    <style>
+      body { font-family: Arial, sans-serif; margin: 40px; }
+      .result { border: 1px solid #ccc; padding: 15px; margin-bottom: 20px; border-radius: 8px; }
+      .confirmed { background-color: #d4f8d4; }
+      .refuted { background-color: #ffd3d3; }
+      .unclear { background-color: #fff7cc; }
+      h2 { margin-top: 40px; }
+      pre { white-space: pre-wrap; }
+    </style>
   </head>
-  <body>
-    <h1>Fact Checker</h1>
-    <textarea id="text" rows="10" cols="80" placeholder="Paste text here..."></textarea><br/>
-    <button id="send">Check</button>
 
-    <pre id="output"></pre>
+  <body>
+    <h1>Wikipedia Fact Checker</h1>
+
+    <textarea id="text" rows="10" cols="80" placeholder="Paste text here..."></textarea><br/>
+    <button id="send">Check Facts</button>
+
+    <h2>Results</h2>
+    <div id="results"></div>
 
     <script>
       document.getElementById('send').addEventListener('click', async () => {
@@ -18,15 +30,35 @@
 
         const res = await fetch('/extract-and-verify', {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text })
         });
 
-        const data = await res.text();
-        // show raw response
-        document.getElementById('output').textContent = data;
+        const data = await res.json();
+        const container = document.getElementById('results');
+        container.innerHTML = "";
+
+        if (!data.results || data.results.length === 0) {
+          container.innerHTML = "<p>No claims found.</p>";
+          return;
+        }
+
+        data.results.forEach(r => {
+          const div = document.createElement("div");
+          div.className = `result ${r.status}`;
+
+          div.innerHTML = `
+            <h3>Claim:</h3>
+            <p>${r.claim}</p>
+
+            <h4>Status: ${r.status.toUpperCase()}</h4>
+            <p><strong>Evidence:</strong> ${r.evidence}</p>
+
+            ${r.source_url ? `<p><a href="${r.source_url}" target="_blank">Source</a></p>` : ""}
+          `;
+
+          container.appendChild(div);
+        });
       });
     </script>
   </body>
