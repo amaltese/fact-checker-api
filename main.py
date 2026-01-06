@@ -82,8 +82,17 @@ def extract_claims(text: str) -> list:
         logger.error(f"Extraction Error: {e}")
         return []
 
+_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
+    "he", "her", "him", "his", "i", "in", "is", "it", "its", "of", "on",
+    "or", "that", "the", "their", "they", "this", "to", "was", "were",
+    "will", "with", "you", "your"
+}
+
+
 def _tokenize(text: str) -> set:
-    return set(re.findall(r"[A-Za-z0-9']+", text.lower()))
+    tokens = re.findall(r"[A-Za-z0-9']+", text.lower())
+    return {t for t in tokens if t and t not in _STOPWORDS}
 
 def _split_sentences(text: str) -> list:
     if not text:
@@ -106,11 +115,11 @@ def _score_sentence(sentence: str, claim_tokens: set, entity_tokens: set) -> int
     return overlap + (2 * entity_overlap)
 
 
-def _extract_relevant_sentences(page, claim: str, max_sentences: int = 3) -> list:
+def _extract_relevant_sentences(page, claim: str, max_sentences: int = 3) -> tuple:
     claim_tokens = _tokenize(claim)
     entity_tokens = _tokenize(" ".join(_extract_entities(claim)))
     if not claim_tokens:
-        return []
+        return [], 0
 
     sentences = _split_sentences(getattr(page, "content", "") or "")
     scored = []
@@ -127,12 +136,14 @@ def _extract_relevant_sentences(page, claim: str, max_sentences: int = 3) -> lis
                 scored.append((score, idx, sentence))
 
     if not scored:
-        return []
+        return [], 0
 
     scored.sort(key=lambda item: (-item[0], item[1]))
     selected = scored[:max_sentences]
     selected.sort(key=lambda item: item[1])
-    return [item[2] for item in selected]
+    evidence = [item[2] for item in selected]
+    total_score = sum(item[0] for item in selected)
+    return evidence, total_score
 
 
 def _extract_entities(text: str) -> list:
@@ -158,12 +169,65 @@ def _pick_best_title(titles: list, query: str) -> str:
     query_tokens = _tokenize(query)
     if not query_tokens:
         return titles[0]
-    scored = []
+    best_title = titles[0]
+    best_score = None
+    query_lower = query.lower().strip()
     for title in titles:
-        score = len(query_tokens & _tokenize(title))
-        scored.append((score, title))
-    scored.sort(key=lambda item: item[0], reverse=True)
-    return scored[0][1]
+        title_tokens = _tokenize(title)
+        overlap = len(query_tokens & title_tokens)
+        exact = 1 if title.lower() == query_lower else 0
+        prefix = 1 if title.lower().startswith(query_lower) else 0
+        extra_tokens = max(len(title_tokens - query_tokens), 0)
+        score = (exact, prefix, overlap, -extra_tokens, -len(title))
+        if best_score is None or score > best_score:
+            best_score = score
+            best_title = title
+    return best_title
+
+
+def _best_title_for_query(query: str) -> str:
+    search_results = wikipedia.search(query, results=5)
+    if not search_results:
+        return ""
+    return _pick_best_title(search_results, query)
+
+
+def _select_candidate_titles(claim: str) -> list:
+    entities = _extract_entities(claim)
+    candidates = []
+
+    if entities:
+        primary = entities[0]
+        primary_title = _best_title_for_query(primary)
+        if primary_title:
+            candidates.append(primary_title)
+
+        for ent in entities[1:]:
+            title = _best_title_for_query(ent)
+            if title:
+                candidates.append(title)
+
+    fallback_title = _best_title_for_query(claim)
+    if fallback_title:
+        candidates.append(fallback_title)
+
+    seen = set()
+    ordered = []
+    for title in candidates:
+        if title not in seen:
+            seen.add(title)
+            ordered.append(title)
+    return ordered
+
+
+def _fetch_page(title: str, query: str):
+    try:
+        return wikipedia.page(title, auto_suggest=False)
+    except DisambiguationError as e:
+        option_title = _pick_best_title(e.options[:10], query)
+        return wikipedia.page(option_title, auto_suggest=False)
+    except PageError:
+        return wikipedia.page(title, auto_suggest=True)
 
 
 @app.post("/extract-and-verify")
@@ -202,29 +266,36 @@ async def extract_and_verify(request: Request):
 
     for claim in claims:
         try:
-            # Step 1: Build a query from entities or fallback to the claim
-            search_query = _build_search_query(claim)
-
-            # Step 2: Fetch Wikipedia content
-            search_results = wikipedia.search(search_query, results=5)
-            if not search_results:
-                search_results = wikipedia.search(claim, results=5)
-            if not search_results:
+            # Step 1: Select candidate pages (primary entity first)
+            candidate_titles = _select_candidate_titles(claim)
+            if not candidate_titles:
                 results.append({"claim": claim, "found": "No matching Wikipedia article."})
                 continue
 
-            best_title = _pick_best_title(search_results, search_query)
-            try:
-                page = wikipedia.page(best_title, auto_suggest=False)
-            except DisambiguationError as e:
-                option_title = _pick_best_title(e.options[:10], search_query)
-                page = wikipedia.page(option_title, auto_suggest=False)
-            except PageError:
-                page = wikipedia.page(best_title, auto_suggest=True)
+            # Step 2: Extract evidence from the primary page first, then fall back
+            selected_page = None
+            selected_evidence = []
+            selected_score = 0
+            min_score = 2
 
-            # Step 3: Extract evidence sentences that best match the claim
-            evidence_sentences = _extract_relevant_sentences(page, claim, max_sentences=3)
-            evidence_text = " ".join(evidence_sentences) if evidence_sentences else ""
+            for title in candidate_titles:
+                page = _fetch_page(title, claim)
+                evidence_sentences, score = _extract_relevant_sentences(page, claim, max_sentences=3)
+                if evidence_sentences and score >= min_score:
+                    selected_page = page
+                    selected_evidence = evidence_sentences
+                    selected_score = score
+                    break
+                if score > selected_score:
+                    selected_page = page
+                    selected_evidence = evidence_sentences
+                    selected_score = score
+
+            if not selected_page:
+                results.append({"claim": claim, "found": "No matching Wikipedia article."})
+                continue
+
+            evidence_text = " ".join(selected_evidence) if selected_evidence else ""
 
             # Step 4: Direct Summary based on evidence (No judgements like Confirmed/Refuted)
             verify_prompt = f"""
@@ -243,8 +314,8 @@ async def extract_and_verify(request: Request):
             results.append({
                 "claim": claim,
                 "found": verification_res,
-                "evidence": evidence_sentences,
-                "source": page.url
+                "evidence": selected_evidence,
+                "source": selected_page.url
             })
 
         except Exception as e:
