@@ -90,8 +90,15 @@ _STOPWORDS = {
 }
 
 
+def _normalize_text(text: str) -> str:
+    if not text:
+        return ""
+    return re.sub(r"\bU\.S\.A?\.?\b", "USA", text)
+
+
 def _tokenize(text: str) -> set:
-    tokens = re.findall(r"[A-Za-z0-9']+", text.lower())
+    normalized = _normalize_text(text.lower())
+    tokens = re.findall(r"[A-Za-z0-9']+", normalized)
     return {t for t in tokens if t and t not in _STOPWORDS}
 
 def _split_sentences(text: str) -> list:
@@ -104,36 +111,45 @@ def _split_sentences(text: str) -> list:
     return [p.strip() for p in parts if p.strip()]
 
 
-def _score_sentence(sentence: str, claim_tokens: set, entity_tokens: set) -> int:
+def _score_sentence(
+    sentence: str,
+    claim_tokens: set,
+    entity_tokens: set,
+    keyword_tokens: set,
+    require_keyword: bool
+) -> int:
     if not sentence:
         return 0
     sent_tokens = _tokenize(sentence)
     if not sent_tokens:
         return 0
+    keyword_overlap = len(sent_tokens & keyword_tokens)
+    if require_keyword and keyword_tokens and keyword_overlap == 0:
+        return 0
     overlap = len(sent_tokens & claim_tokens)
     entity_overlap = len(sent_tokens & entity_tokens)
-    return overlap + (2 * entity_overlap)
+    return overlap + (2 * entity_overlap) + (2 * keyword_overlap)
 
 
-def _extract_relevant_sentences(page, claim: str, max_sentences: int = 3) -> tuple:
+def _extract_relevant_sentences(page, claim: str, max_sentences: int = 4) -> tuple:
     claim_tokens = _tokenize(claim)
     entity_tokens = _tokenize(" ".join(_extract_entities(claim)))
+    keyword_tokens = _expand_claim_keywords(claim)
     if not claim_tokens:
         return [], 0
 
     sentences = _split_sentences(getattr(page, "content", "") or "")
-    scored = []
-    for idx, sentence in enumerate(sentences):
-        score = _score_sentence(sentence, claim_tokens, entity_tokens)
-        if score > 0:
-            scored.append((score, idx, sentence))
+    scored = _score_sentences(sentences, claim_tokens, entity_tokens, keyword_tokens, True)
+
+    if not scored:
+        scored = _score_sentences(sentences, claim_tokens, entity_tokens, keyword_tokens, False)
 
     if not scored:
         sentences = _split_sentences(getattr(page, "summary", "") or "")
-        for idx, sentence in enumerate(sentences):
-            score = _score_sentence(sentence, claim_tokens, entity_tokens)
-            if score > 0:
-                scored.append((score, idx, sentence))
+        scored = _score_sentences(sentences, claim_tokens, entity_tokens, keyword_tokens, True)
+
+    if not scored:
+        scored = _score_sentences(sentences, claim_tokens, entity_tokens, keyword_tokens, False)
 
     if not scored:
         return [], 0
@@ -145,6 +161,57 @@ def _extract_relevant_sentences(page, claim: str, max_sentences: int = 3) -> tup
     total_score = sum(item[0] for item in selected)
     return evidence, total_score
 
+
+def _score_sentences(
+    sentences: list,
+    claim_tokens: set,
+    entity_tokens: set,
+    keyword_tokens: set,
+    require_keyword: bool
+) -> list:
+    scored = []
+    for idx, sentence in enumerate(sentences):
+        score = _score_sentence(
+            sentence,
+            claim_tokens,
+            entity_tokens,
+            keyword_tokens,
+            require_keyword
+        )
+        if score > 0:
+            scored.append((score, idx, sentence))
+    return scored
+
+
+def _expand_claim_keywords(claim: str) -> set:
+    normalized = _normalize_text(claim.lower())
+    keywords = set(_tokenize(normalized))
+
+    if re.search(r"\b(from|born|birth|native|nationality)\b", normalized):
+        keywords.update({"born", "birth", "birthplace", "native", "village", "city", "country"})
+
+    if re.search(r"\b(move|moved|emigrate|emigrated|immigrate|immigrated|relocate|relocated|settled|arrived)\b", normalized):
+        keywords.update({"moved", "emigrated", "immigrated", "immigration", "emigration", "relocated", "settled", "arrived"})
+        keywords.update({"united", "states", "usa", "america", "american", "us"})
+
+    if re.search(r"\blived\b.*\blife\b|\brest of (his|her|their) life\b|\bspent\b.*\b(later|final)\b", normalized):
+        keywords.update({"lived", "life", "rest", "final", "later", "years", "died", "death", "resident", "resided"})
+        keywords.update({"united", "states", "usa", "america", "american", "us", "new", "york", "ny"})
+
+    if re.search(r"\bnever\b.*\bmet\b|\bdid not\b.*\bmeet\b|\bdidn't\b.*\bmeet\b", normalized):
+        keywords.update({"met", "meet", "meeting", "encountered", "corresponded", "correspondence"})
+        keywords.update({"wrote", "letter", "letters", "congratulations", "birthday", "greeted"})
+
+    if re.search(r"\b(ac|alternating current)\b", normalized):
+        keywords.update({"alternating", "current", "ac", "induction", "motor", "power", "system"})
+
+    if re.search(r"\b(discover|invent|develop|create)\b", normalized):
+        keywords.update({"discover", "discovered", "invent", "invented", "developed", "created", "patent", "patents"})
+
+    if "croatia" in normalized:
+        keywords.update({"croatia", "smiljan", "austrian", "empire", "serb", "serbian"})
+
+    return keywords
 
 def _extract_entities(text: str) -> list:
     pattern = r"\b(?:[A-Z][a-z]+|[A-Z]{2,})(?:\s+(?:[A-Z][a-z]+|[A-Z]{2,}))*\b"
@@ -301,9 +368,8 @@ async def extract_and_verify(request: Request):
             verify_prompt = f"""
             Claim: {claim}
             Evidence sentences: {evidence_text or "No direct evidence found in the article."}
-            Summarize what Wikipedia says about this claim in one sentence.
+            Summarize what the evidence says in one sentence without judging the claim.
             If the evidence does not address the claim, say that directly.
-            Do not use labels like 'Confirmed' or 'Refuted'.
             """
 
             # Small delay to respect rate limits
