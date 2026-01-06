@@ -89,11 +89,57 @@ _STOPWORDS = {
     "will", "with", "you", "your"
 }
 
+_IRRELEVANT_SECTION_TITLES = {
+    "see also",
+    "notes",
+    "references",
+    "bibliography",
+    "further reading",
+    "external links",
+    "sources",
+    "works",
+    "publications"
+}
+
 
 def _normalize_text(text: str) -> str:
     if not text:
         return ""
     return re.sub(r"\bU\.S\.A?\.?\b", "USA", text)
+
+
+def _trim_irrelevant_sections(content: str) -> str:
+    if not content:
+        return ""
+    lines = content.splitlines()
+    kept = []
+    for line in lines:
+        stripped = line.strip()
+        heading = re.match(r"^=+\s*(.*?)\s*=+$", stripped)
+        if heading:
+            title = heading.group(1).strip().lower()
+            if title in _IRRELEVANT_SECTION_TITLES:
+                break
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def _clean_wikipedia_text(text: str) -> str:
+    if not text:
+        return ""
+    text = re.sub(r"\[[^\]]+\]", "", text)
+    lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(("*", "|", "!", "{{", "}}", "File:", "Image:")):
+            continue
+        if stripped.startswith("="):
+            continue
+        lines.append(stripped)
+    cleaned = " ".join(lines)
+    return re.sub(r"\s+", " ", cleaned).strip()
 
 
 def _tokenize(text: str) -> set:
@@ -111,48 +157,196 @@ def _split_sentences(text: str) -> list:
     return [p.strip() for p in parts if p.strip()]
 
 
+def _build_sentence_candidates(page) -> tuple:
+    summary = _clean_wikipedia_text(getattr(page, "summary", "") or "")
+    content = _clean_wikipedia_text(_trim_irrelevant_sections(getattr(page, "content", "") or ""))
+    summary_sentences = _split_sentences(summary)
+    content_sentences = _split_sentences(content)
+
+    sentences = []
+    seen = set()
+    summary_count = 0
+
+    for sentence in summary_sentences:
+        norm = re.sub(r"\s+", " ", sentence).strip().lower()
+        if not norm or norm in seen:
+            continue
+        if len(_tokenize(sentence)) < 2:
+            continue
+        seen.add(norm)
+        sentences.append(sentence)
+        summary_count += 1
+
+    for sentence in content_sentences:
+        norm = re.sub(r"\s+", " ", sentence).strip().lower()
+        if not norm or norm in seen:
+            continue
+        if len(_tokenize(sentence)) < 2:
+            continue
+        seen.add(norm)
+        sentences.append(sentence)
+
+    return sentences, summary_count
+
+
+def _extract_phrases(text: str) -> set:
+    normalized = _normalize_text(text.lower())
+    tokens = [t for t in re.findall(r"[A-Za-z0-9']+", normalized) if t and t not in _STOPWORDS]
+    phrases = set()
+    for size in (2, 3):
+        for idx in range(len(tokens) - size + 1):
+            phrase = " ".join(tokens[idx:idx + size])
+            if len(phrase) >= 5:
+                phrases.add(phrase)
+    return phrases
+
+
+def _object_entity_tokens(claim: str) -> set:
+    entities = _extract_entities(claim)
+    if len(entities) <= 1:
+        return set()
+    return _tokenize(" ".join(entities[1:]))
+
+
+def _required_keyword_groups(claim: str) -> list:
+    normalized = _normalize_text(claim.lower())
+    groups = []
+    object_tokens = _object_entity_tokens(claim)
+
+    if re.search(r"\b(from|born|birth|native|nationality)\b", normalized):
+        groups.append({"born", "birth", "birthplace", "native"})
+        if object_tokens:
+            groups.append(object_tokens)
+
+    if re.search(r"\b(move|moved|emigrate|emigrated|immigrate|immigrated|relocate|relocated|settled|arrived)\b", normalized):
+        groups.append({"move", "moved", "emigrate", "emigrated", "immigrate", "immigrated", "relocate", "relocated", "settled", "arrived"})
+        if object_tokens:
+            groups.append(object_tokens)
+
+    if re.search(r"\blived\b.*\blife\b|\brest of (his|her|their) life\b|\bspent\b.*\b(later|final)\b", normalized):
+        groups.append({"lived", "life", "rest", "final", "later", "years", "died", "death", "resident", "resided"})
+        if object_tokens:
+            groups.append(object_tokens)
+
+    if re.search(r"\b(never )?met\b|\bmeet\b|\bmeeting\b", normalized):
+        groups.append({"met", "meet", "meeting", "encountered", "corresponded", "correspondence", "congratulations"})
+        if object_tokens:
+            groups.append(object_tokens)
+
+    if re.search(r"\b(discover|invent|develop|create)\b", normalized):
+        groups.append({"discover", "discovered", "invent", "invented", "developed", "created"})
+        if object_tokens:
+            groups.append(object_tokens)
+
+    return [g for g in groups if g]
+
+
+def _noise_penalty(sentence: str) -> int:
+    if not sentence:
+        return 0
+    penalty = 0
+    lower = sentence.lower()
+    if len(sentence) > 280:
+        penalty += 2
+    if len(sentence) > 400:
+        penalty += 2
+    if sentence.count(";") >= 2:
+        penalty += 2
+    if sentence.count(",") >= 6:
+        penalty += 1
+    if re.search(r"\b(isbn|oclc|doi|retrieved|archived|citation|href|http|https)\b", lower):
+        penalty += 3
+    if re.search(r"\b(see also|references|bibliography|external links)\b", lower):
+        penalty += 3
+    return penalty
+
+
+def _position_bonus(index: int, summary_count: int) -> int:
+    if index < summary_count:
+        return 3
+    if index < summary_count + 3:
+        return 2
+    if index < summary_count + 10:
+        return 1
+    return 0
+
+
 def _score_sentence(
     sentence: str,
     claim_tokens: set,
     entity_tokens: set,
     keyword_tokens: set,
-    require_keyword: bool
+    require_keyword: bool,
+    required_groups: list,
+    phrases: set
 ) -> int:
     if not sentence:
         return 0
     sent_tokens = _tokenize(sentence)
     if not sent_tokens:
         return 0
+    if required_groups:
+        for group in required_groups:
+            if group and not (sent_tokens & group):
+                return 0
     keyword_overlap = len(sent_tokens & keyword_tokens)
     if require_keyword and keyword_tokens and keyword_overlap == 0:
         return 0
     overlap = len(sent_tokens & claim_tokens)
     entity_overlap = len(sent_tokens & entity_tokens)
-    return overlap + (2 * entity_overlap) + (2 * keyword_overlap)
+    phrase_bonus = 0
+    normalized_sentence = _normalize_text(sentence.lower())
+    for phrase in phrases:
+        if phrase in normalized_sentence:
+            phrase_bonus += 2
+    length_penalty = max(0, (len(sent_tokens) - 30) // 8)
+    return (
+        overlap
+        + (2 * entity_overlap)
+        + (2 * keyword_overlap)
+        + phrase_bonus
+        - length_penalty
+        - _noise_penalty(sentence)
+    )
 
 
 def _extract_relevant_sentences(page, claim: str, max_sentences: int = 4) -> tuple:
     claim_tokens = _tokenize(claim)
     entity_tokens = _tokenize(" ".join(_extract_entities(claim)))
     keyword_tokens = _expand_claim_keywords(claim)
+    required_groups = _required_keyword_groups(claim)
+    phrases = _extract_phrases(claim)
     if not claim_tokens:
         return [], 0
 
-    sentences = _split_sentences(getattr(page, "content", "") or "")
-    scored = _score_sentences(sentences, claim_tokens, entity_tokens, keyword_tokens, True)
+    sentences, summary_count = _build_sentence_candidates(page)
+    scored = _score_sentences(
+        sentences,
+        claim_tokens,
+        entity_tokens,
+        keyword_tokens,
+        True,
+        required_groups,
+        phrases,
+        summary_count
+    )
 
     if not scored:
-        scored = _score_sentences(sentences, claim_tokens, entity_tokens, keyword_tokens, False)
+        scored = _score_sentences(
+            sentences,
+            claim_tokens,
+            entity_tokens,
+            keyword_tokens,
+            False,
+            required_groups,
+            phrases,
+            summary_count
+        )
 
     if not scored:
-        sentences = _split_sentences(getattr(page, "summary", "") or "")
-        scored = _score_sentences(sentences, claim_tokens, entity_tokens, keyword_tokens, True)
-
-    if not scored:
-        scored = _score_sentences(sentences, claim_tokens, entity_tokens, keyword_tokens, False)
-
-    if not scored:
-        return [], 0
+        fallback = _fallback_sentences(sentences, entity_tokens, max_sentences)
+        fallback_score = _fallback_score(fallback, entity_tokens)
+        return fallback, fallback_score
 
     scored.sort(key=lambda item: (-item[0], item[1]))
     selected = scored[:max_sentences]
@@ -167,7 +361,10 @@ def _score_sentences(
     claim_tokens: set,
     entity_tokens: set,
     keyword_tokens: set,
-    require_keyword: bool
+    require_keyword: bool,
+    required_groups: list,
+    phrases: set,
+    summary_count: int
 ) -> list:
     scored = []
     for idx, sentence in enumerate(sentences):
@@ -176,11 +373,43 @@ def _score_sentences(
             claim_tokens,
             entity_tokens,
             keyword_tokens,
-            require_keyword
+            require_keyword,
+            required_groups,
+            phrases
         )
         if score > 0:
+            score += _position_bonus(idx, summary_count)
             scored.append((score, idx, sentence))
     return scored
+
+
+def _fallback_sentences(sentences: list, entity_tokens: set, max_sentences: int) -> list:
+    if not sentences:
+        return []
+
+    if entity_tokens:
+        scored = []
+        for idx, sentence in enumerate(sentences):
+            sent_tokens = _tokenize(sentence)
+            score = len(sent_tokens & entity_tokens)
+            scored.append((score, idx, sentence))
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        selected = scored[:max_sentences]
+        selected.sort(key=lambda item: item[1])
+        return [item[2] for item in selected]
+
+    return sentences[:max_sentences]
+
+
+def _fallback_score(sentences: list, entity_tokens: set) -> int:
+    if not sentences:
+        return 0
+    if not entity_tokens:
+        return 1
+    total = 0
+    for sentence in sentences:
+        total += len(_tokenize(sentence) & entity_tokens)
+    return total
 
 
 def _expand_claim_keywords(claim: str) -> set:
@@ -364,18 +593,21 @@ async def extract_and_verify(request: Request):
 
             evidence_text = " ".join(selected_evidence) if selected_evidence else ""
 
-            # Step 4: Direct Summary based on evidence (No judgements like Confirmed/Refuted)
-            verify_prompt = f"""
-            Claim: {claim}
-            Evidence sentences: {evidence_text or "No direct evidence found in the article."}
-            Summarize what the evidence says in one sentence without judging the claim.
-            If the evidence does not address the claim, say that directly.
-            """
+            if not evidence_text:
+                verification_res = "No evidence sentences available to summarize."
+            else:
+                # Step 4: Direct Summary based on evidence (no claim judgement)
+                verify_prompt = f"""
+                Evidence sentences: {evidence_text}
+                Write one concise sentence summarizing only what the evidence says.
+                Do not evaluate the claim and do not mention whether it is supported.
+                Do not refer to the claim explicitly.
+                """
 
-            # Small delay to respect rate limits
-            time.sleep(0.5)
+                # Small delay to respect rate limits
+                time.sleep(0.5)
 
-            verification_res = model.generate_content(verify_prompt).text.strip()
+                verification_res = model.generate_content(verify_prompt).text.strip()
 
             results.append({
                 "claim": claim,
