@@ -25,16 +25,27 @@
 
     <script>
       document.getElementById('send').addEventListener('click', async () => {
-        const text = document.getElementById('text').value;
+        const text = document.getElementById('text').value.trim();
         if (!text) return alert('Please enter text');
 
-        const res = await fetch('/extract-and-verify', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text })
-        });
+        let data;
+        try {
+          const res = await fetch('/extract-and-verify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text })
+          });
+          if (!res.ok) {
+            const errorText = await res.text();
+            throw new Error(errorText || 'Request failed');
+          }
+          data = await res.json();
+        } catch (err) {
+          const container = document.getElementById('results');
+          container.innerHTML = `<p>Request error: ${err.message}</p>`;
+          return;
+        }
 
-        const data = await res.json();
         const container = document.getElementById('results');
         container.innerHTML = "";
 
@@ -45,17 +56,52 @@
 
         data.results.forEach(r => {
           const div = document.createElement("div");
-          div.className = `result ${r.status}`;
+          div.className = "result";
 
-          div.innerHTML = `
-            <h3>Claim:</h3>
-            <p>${r.claim}</p>
+          const claimTitle = document.createElement("h3");
+          claimTitle.textContent = "Claim:";
+          div.appendChild(claimTitle);
 
-            <h4>Status: ${r.status.toUpperCase()}</h4>
-            <p><strong>Evidence:</strong> ${r.evidence}</p>
+          const claimText = document.createElement("p");
+          claimText.textContent = r.claim || "(missing claim)";
+          div.appendChild(claimText);
 
-            ${r.source_url ? `<p><a href="${r.source_url}" target="_blank">Source</a></p>` : ""}
-          `;
+          const evidenceTitle = document.createElement("h4");
+          evidenceTitle.textContent = "Wikipedia summary:";
+          div.appendChild(evidenceTitle);
+
+          const evidenceText = document.createElement("p");
+          evidenceText.textContent = r.found || "No summary available.";
+          div.appendChild(evidenceText);
+
+          const evidenceListTitle = document.createElement("h4");
+          evidenceListTitle.textContent = "Evidence sentences:";
+          div.appendChild(evidenceListTitle);
+
+          if (Array.isArray(r.evidence) && r.evidence.length > 0) {
+            const evidenceList = document.createElement("ul");
+            r.evidence.forEach(sentence => {
+              const li = document.createElement("li");
+              li.textContent = sentence;
+              evidenceList.appendChild(li);
+            });
+            div.appendChild(evidenceList);
+          } else {
+            const noEvidence = document.createElement("p");
+            noEvidence.textContent = "No evidence sentences found.";
+            div.appendChild(noEvidence);
+          }
+
+          if (r.source) {
+            const sourceP = document.createElement("p");
+            const link = document.createElement("a");
+            link.href = r.source;
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            link.textContent = "Source";
+            sourceP.appendChild(link);
+            div.appendChild(sourceP);
+          }
 
           container.appendChild(div);
         });
