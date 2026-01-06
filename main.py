@@ -7,6 +7,7 @@ from wikipedia.exceptions import DisambiguationError, PageError
 import logging
 import google.generativeai as genai
 import os
+import math
 import re
 import time
 
@@ -23,6 +24,11 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 else:
     logger.warning("GEMINI_API_KEY not found. API calls will fail (or be mocked).")
+
+USE_EMBEDDINGS = os.getenv("USE_EMBEDDINGS", "0").lower() in {"1", "true", "yes"}
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "models/embedding-001")
+EMBEDDINGS_TOP_K = int(os.getenv("EMBEDDINGS_TOP_K", "25"))
+EMBEDDING_WEIGHT = float(os.getenv("EMBEDDING_WEIGHT", "8.0"))
 
 app.add_middleware(
     CORSMiddleware,
@@ -271,6 +277,88 @@ def _position_bonus(index: int, summary_count: int) -> int:
     return 0
 
 
+def _cosine_similarity(a: list, b: list) -> float:
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = 0.0
+    norm_a = 0.0
+    norm_b = 0.0
+    for x, y in zip(a, b):
+        dot += x * y
+        norm_a += x * x
+        norm_b += y * y
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot / (math.sqrt(norm_a) * math.sqrt(norm_b))
+
+
+def _extract_embedding_from_response(response):
+    if response is None:
+        return None
+    if isinstance(response, dict):
+        if "embedding" in response:
+            emb = response.get("embedding")
+            if isinstance(emb, dict) and "values" in emb:
+                return emb.get("values")
+            return emb
+        if "embeddings" in response:
+            return response.get("embeddings")
+    if hasattr(response, "embedding"):
+        emb = response.embedding
+        if isinstance(emb, dict) and "values" in emb:
+            return emb.get("values")
+        return emb
+    return None
+
+
+def _embed_texts(texts: list, task_type: str) -> list:
+    if not texts:
+        return []
+    embeddings = []
+    for text in texts:
+        try:
+            response = genai.embed_content(
+                model=EMBEDDING_MODEL,
+                content=text,
+                task_type=task_type
+            )
+            emb = _extract_embedding_from_response(response)
+            if isinstance(emb, dict) and "values" in emb:
+                emb = emb.get("values")
+            embeddings.append(emb)
+        except Exception as e:
+            logger.warning("Embedding error: %s", e)
+            embeddings.append(None)
+    return embeddings
+
+
+def _rerank_with_embeddings(claim: str, scored: list, max_sentences: int) -> list:
+    if not scored or not USE_EMBEDDINGS or not GEMINI_API_KEY:
+        return scored
+    scored_sorted = sorted(scored, key=lambda item: (-item[0], item[1]))
+    candidates = scored_sorted[:EMBEDDINGS_TOP_K]
+    candidate_sentences = [item[2] for item in candidates]
+
+    claim_embeddings = _embed_texts([claim], "retrieval_query")
+    sentence_embeddings = _embed_texts(candidate_sentences, "retrieval_document")
+    if not claim_embeddings or not claim_embeddings[0]:
+        return scored
+    claim_embedding = claim_embeddings[0]
+
+    reranked = []
+    for (base_score, idx, sentence), sent_emb in zip(candidates, sentence_embeddings):
+        if not sent_emb:
+            combined = base_score
+        else:
+            similarity = _cosine_similarity(claim_embedding, sent_emb)
+            combined = base_score + (EMBEDDING_WEIGHT * similarity)
+        reranked.append((combined, idx, sentence))
+
+    if not reranked:
+        return scored
+    reranked.sort(key=lambda item: (-item[0], item[1]))
+    return reranked[:max_sentences]
+
 def _score_sentence(
     sentence: str,
     claim_tokens: set,
@@ -320,7 +408,7 @@ def _extract_relevant_sentences(page, claim: str, max_sentences: int = 4) -> tup
         return [], 0
 
     sentences, summary_count = _build_sentence_candidates(page)
-    scored = _score_sentences(
+    scored_strict = _score_sentences(
         sentences,
         claim_tokens,
         entity_tokens,
@@ -331,8 +419,8 @@ def _extract_relevant_sentences(page, claim: str, max_sentences: int = 4) -> tup
         summary_count
     )
 
-    if not scored:
-        scored = _score_sentences(
+    if not scored_strict:
+        scored_strict = _score_sentences(
             sentences,
             claim_tokens,
             entity_tokens,
@@ -343,13 +431,32 @@ def _extract_relevant_sentences(page, claim: str, max_sentences: int = 4) -> tup
             summary_count
         )
 
-    if not scored:
+    if USE_EMBEDDINGS and GEMINI_API_KEY:
+        scored_relaxed = _score_sentences(
+            sentences,
+            claim_tokens,
+            entity_tokens,
+            keyword_tokens,
+            False,
+            [],
+            phrases,
+            summary_count
+        )
+        if scored_relaxed:
+            reranked = _rerank_with_embeddings(claim, scored_relaxed, max_sentences)
+            if reranked:
+                reranked.sort(key=lambda item: item[1])
+                evidence = [item[2] for item in reranked]
+                total_score = sum(item[0] for item in reranked)
+                return evidence, total_score
+
+    if not scored_strict:
         fallback = _fallback_sentences(sentences, entity_tokens, max_sentences)
         fallback_score = _fallback_score(fallback, entity_tokens)
         return fallback, fallback_score
 
-    scored.sort(key=lambda item: (-item[0], item[1]))
-    selected = scored[:max_sentences]
+    scored_strict.sort(key=lambda item: (-item[0], item[1]))
+    selected = scored_strict[:max_sentences]
     selected.sort(key=lambda item: item[1])
     evidence = [item[2] for item in selected]
     total_score = sum(item[0] for item in selected)
