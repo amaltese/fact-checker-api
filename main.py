@@ -27,7 +27,7 @@ else:
 
 USE_EMBEDDINGS = os.getenv("USE_EMBEDDINGS", "0").lower() in {"1", "true", "yes"}
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "models/embedding-001")
-EMBEDDINGS_TOP_K = int(os.getenv("EMBEDDINGS_TOP_K", "25"))
+EMBEDDINGS_TOP_K = int(os.getenv("EMBEDDINGS_TOP_K", "60"))
 EMBEDDING_WEIGHT = float(os.getenv("EMBEDDING_WEIGHT", "8.0"))
 
 app.add_middleware(
@@ -332,11 +332,29 @@ def _embed_texts(texts: list, task_type: str) -> list:
     return embeddings
 
 
-def _rerank_with_embeddings(claim: str, scored: list, max_sentences: int) -> list:
-    if not scored or not USE_EMBEDDINGS or not GEMINI_API_KEY:
-        return scored
-    scored_sorted = sorted(scored, key=lambda item: (-item[0], item[1]))
-    candidates = scored_sorted[:EMBEDDINGS_TOP_K]
+def _merge_embedding_candidates(primary: list, secondary: list, limit: int) -> list:
+    seen = set()
+    merged = []
+    for item in primary:
+        idx = item[1]
+        if idx not in seen:
+            merged.append(item)
+            seen.add(idx)
+        if len(merged) >= limit:
+            return merged
+    for item in secondary:
+        idx = item[1]
+        if idx not in seen:
+            merged.append(item)
+            seen.add(idx)
+        if len(merged) >= limit:
+            break
+    return merged
+
+
+def _rerank_with_embeddings(claim: str, candidates: list, max_sentences: int) -> list:
+    if not candidates or not USE_EMBEDDINGS or not GEMINI_API_KEY:
+        return candidates
     candidate_sentences = [item[2] for item in candidates]
 
     claim_embeddings = _embed_texts([claim], "retrieval_query")
@@ -443,7 +461,14 @@ def _extract_relevant_sentences(page, claim: str, max_sentences: int = 4) -> tup
             summary_count
         )
         if scored_relaxed:
-            reranked = _rerank_with_embeddings(claim, scored_relaxed, max_sentences)
+            scored_relaxed.sort(key=lambda item: (-item[0], item[1]))
+            scored_strict_sorted = sorted(scored_strict, key=lambda item: (-item[0], item[1]))
+            candidates = _merge_embedding_candidates(
+                scored_strict_sorted,
+                scored_relaxed,
+                EMBEDDINGS_TOP_K
+            )
+            reranked = _rerank_with_embeddings(claim, candidates, max_sentences)
             if reranked:
                 reranked.sort(key=lambda item: item[1])
                 evidence = [item[2] for item in reranked]
